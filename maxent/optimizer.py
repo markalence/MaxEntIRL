@@ -162,7 +162,7 @@ class ExpSga(Optimizer):
         self.k += 1
 
         self.parameters *= np.exp(lr * grad)
-
+        # self.normalize = True
         if self.normalize:
             self.parameters /= self.parameters.sum()
 

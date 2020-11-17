@@ -8,9 +8,8 @@ by Ziebart (2010).
 
 import json
 import numpy as np
-from scipy.sparse import csr_matrix
-import sparse
-from itertools import product
+
+learning_rate = ''
 
 
 # -- common functions ----------------------------------------------------------
@@ -103,9 +102,8 @@ def expected_svf_from_policy(p_transition, sas_transition, p_initial, terminal, 
 
     # actual forward-computation of state expectations
     d = p_initial
-
     delta = np.inf
-    while delta > eps:
+    for _ in range(500):
         d_ = [sas_transition[i, :, :].T.dot((d[i] * p_action[i, :])) for i in range(n_states)]
         d_ = np.array(d_).T.sum(axis=0)
         delta, d = np.max(np.abs(d_ - d)), d_
@@ -150,20 +148,22 @@ def local_action_probabilities(p_transition, sas_transition, terminal, reward):
     # guarantee propagation from any state to any other state and back in an
     # arbitrary MDP defined by p_transition.
 
-    for _ in range(n_states * 2):
+    for _ in range(100):
         if _ % 1000 == 0: print(_)
         za = np.array([(sas_transition[i] * er).dot(zs) for i in range(n_states)])
-        za /= np.max(za)
+        for i in range(len(za)):
+            n = np.max(za[i])
+            if n != 0:
+                za[i] /= n
+        # za /= np.max(za)
         zs = za.sum(axis=1)
 
     # compute local action probabilities
-    policy = za / (zs[:, None] + 1e-100)
-    for i in range(n_states):
-        if sum(policy[i]) != 0:
-            policy = policy * (1 / sum(policy[i]))
-            break
+    policy = za / (zs[:, None] + 1e-300)
+    # policy /= sum(policy[0])
 
-    with open('policies.txt', 'w') as policies:
+    global learning_rate
+    with open(f'policies_{learning_rate}.txt', 'w') as policies:
         policies.write(json.dumps(policy, default=lambda x: list(x), indent=4))
     return policy
 
@@ -199,6 +199,7 @@ def compute_expected_svf(p_transition, sas_transition, p_initial, terminal, rewa
         `[state: Integer] -> svf: Float`.
     """
     p_action = local_action_probabilities(p_transition, sas_transition, terminal, reward)
+
     return expected_svf_from_policy(p_transition, sas_transition, p_initial, terminal, p_action, eps)
 
 
@@ -237,7 +238,8 @@ def irl(p_transition, sas_transition, features, terminal, trajectories, optim, i
     n_states = len(sas_transition)
     n_actions = sas_transition[0].shape[0]
     _, n_features = features.shape
-
+    global learning_rate
+    learning_rate = str(optim.lr)
     # compute static properties from trajectories
     e_features = feature_expectation_from_trajectories(features, trajectories)
     p_initial = initial_probabilities_from_trajectories(n_states, trajectories)
@@ -245,21 +247,27 @@ def irl(p_transition, sas_transition, features, terminal, trajectories, optim, i
     # basic gradient descent
     theta = init(n_features)
     delta = np.inf
-
     optim.reset(theta)
+    e_svf = []
     while delta > eps:
         theta_old = theta.copy()
 
         # compute per-state reward
         reward = features.dot(theta)
+        with open(f'reward_{learning_rate}.txt', 'w') as policies:
+            policies.write(json.dumps(reward, default=lambda x: list(x), indent=4))
+        print(reward)
 
         # compute the gradient
+        o = e_svf.copy()
         e_svf = compute_expected_svf(p_transition, sas_transition, p_initial, terminal, reward, eps_esvf)
+        e_svf = np.array(e_svf)
+        o = np.array(o)
         grad = e_features - features.T.dot(e_svf)
+        # print(grad)
         # perform optimization step and compute delta for convergence
         optim.step(grad)
         delta = np.max(np.abs(theta_old - theta))
-
         print(delta)
 
     # re-compute per-state reward and return
@@ -336,11 +344,11 @@ def local_causal_action_probabilities(p_transition, sas_transition, terminal, re
 
     delta = np.inf
     z = np.zeros((n_states, n_states, n_actions))
-    while delta > eps:
+    # while delta > eps:
+    for _ in range(2 * n_states):
         v_old = v
-
         # q = np.array([reward + discount * p[a].dot(v_old) for a in range(n_actions)]).T
-        q = np.array(reward + [z[:, :, i] for i in range(n_actions)])
+        q = np.array([reward + discount * sas_transition[:, a, :].dot(v_old) for a in range(n_actions)]).T
         v = reward_terminal
         for a in range(n_actions):
             v = softmax(v, q[:, a])
@@ -390,6 +398,8 @@ def compute_expected_causal_svf(p_transition, sas_transition, p_initial, termina
             threshold on all states in a single iteration.
     """
     p_action = local_causal_action_probabilities(p_transition, sas_transition, terminal, reward, discount, eps_lap)
+    with open(f'causal_policies_{learning_rate}.txt', 'w') as policies:
+        policies.write(json.dumps(p_action, default=lambda x: list(x), indent=4))
     return expected_svf_from_policy(p_transition, sas_transition, p_initial, terminal, p_action, eps_svf)
 
 
@@ -445,23 +455,26 @@ def irl_causal(p_transition, sas_transition, features, terminal, trajectories, o
     # basic gradient descent
     theta = init(n_features)
     delta = np.inf
-
+    global learning_rate
+    learning_rate = optim.lr
     optim.reset(theta)
     while delta > eps:
         theta_old = theta.copy()
 
         # compute per-state reward
         reward = features.dot(theta)
+        with open(f'reward_causal_{learning_rate}.txt', 'w') as policies:
+            policies.write(json.dumps(reward, default=lambda x: list(x), indent=4))
 
         # compute the gradient
-        e_svf = compute_expected_causal_svf(p_transition,sas_transition, p_initial, terminal, reward, discount,
+        e_svf = compute_expected_causal_svf(p_transition, sas_transition, p_initial, terminal, reward, discount,
                                             eps_lap, eps_svf)
 
         grad = e_features - features.T.dot(e_svf)
-
         # perform optimization step and compute delta for convergence
         optim.step(grad)
         delta = np.max(np.abs(theta_old - theta))
+        print(delta)
 
     # re-compute per-state reward and return
     return features.dot(theta)
